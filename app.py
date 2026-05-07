@@ -21,7 +21,7 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-st.title("📰 AI 최신 뉴스 검색 & 자동 저장기")
+st.title("📰 AI 최신 뉴스 검색 & 자동 저장기입니다")
 st.markdown("키워드를 검색하면 Gemini가 구글 검색을 통해 가장 최신 뉴스 2건을 요약하고 DB에 자동 저장합니다.")
 
 # ----------------------------------------------------
