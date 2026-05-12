@@ -51,14 +51,14 @@ from llama_index.core import (
 )
 
 # --- Gemini API와 LlamaIndex를 연결하는 어댑터 ---
-#from llama_index.llms.google_genai import GoogleGenAI            # Gemini를 LLM(답변 생성용)으로 쓰기 위한 어댑터
-#from llama_index.embeddings.google_genai import GoogleGenAIEmbedding  # Gemini를 임베딩(텍스트→벡터)으로 쓰기 위한 어댑터
-#from google.genai.types import EmbedContentConfig                # 임베딩 모델 세부 설정(차원 수 등)
+from llama_index.llms.google_genai import GoogleGenAI            # Gemini를 LLM(답변 생성용)으로 쓰기 위한 어댑터
+from llama_index.embeddings.google_genai import GoogleGenAIEmbedding  # Gemini를 임베딩(텍스트→벡터)으로 쓰기 위한 어댑터
+from google.genai.types import EmbedContentConfig                # 임베딩 모델 세부 설정(차원 수 등)
 
 #from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-from llama_index.llms.gemini import Gemini            
-from llama_index.embeddings.gemini import GeminiEmbedding 
+#from llama_index.llms.gemini import Gemini            
+#from llama_index.embeddings.gemini import GeminiEmbedding 
 
 # --- Supabase pgvector와 LlamaIndex를 연결하는 어댑터 ---
 from llama_index.vector_stores.supabase import SupabaseVectorStore
