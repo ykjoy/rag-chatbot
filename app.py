@@ -1,170 +1,338 @@
+"""
+==============================================================================
+사업보고서 RAG 챗봇 (LlamaIndex + Gemini API + Supabase pgvector)
+==============================================================================
+- PDF 파일 업로드 (DART 사업보고서) 또는 HTML URL 입력 (SEC 10-K 등)
+- LlamaIndex가 자동으로 청킹·임베딩 → Supabase pgvector 저장
+- Gemini가 출처 페이지와 함께 답변 생성
+- 대화 이력은 Supabase chat_history 테이블에 저장
+==============================================================================
+"""
+
 import streamlit as st
 import pandas as pd
-import json
-import re
-from datetime import datetime
-from google import genai
-from google.genai import types
-from supabase import create_client
+import tempfile
+import os
+from supabase import create_client, Client
+from llama_index.core import (
+    VectorStoreIndex,
+    SimpleDirectoryReader,
+    StorageContext,
+    Settings,
+)
+from llama_index.llms.google_genai import GoogleGenAI
+from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
+from llama_index.vector_stores.supabase import SupabaseVectorStore
+from llama_index.readers.web import SimpleWebPageReader
 
-# ----------------------------------------------------
-# 1. 초기 설정 및 시크릿 불러오기
-# ----------------------------------------------------
-st.set_page_config(page_title="AI 최신 뉴스 수집기", page_icon="📰", layout="wide")
+# --------------------------------------------------------------------------
+# 1. 페이지 기본 설정
+# --------------------------------------------------------------------------
+st.set_page_config(
+    page_title="사업보고서 RAG 챗봇",
+    page_icon="📊",
+    layout="wide",
+)
 
-# API 및 DB 연결 (st.secrets 활용)
+# --------------------------------------------------------------------------
+# 2. 비밀 키(Secrets) 불러오기
+# --------------------------------------------------------------------------
+# Streamlit Cloud의 Secrets(또는 로컬의 .streamlit/secrets.toml)에서 키를 읽어옵니다.
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
-# 클라이언트 초기화
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Supabase Direct Connection String (벡터 저장용)
+# Supabase 대시보드 → Project Settings → Database → Connection string에서 확인 가능
+# 형식: postgresql://postgres:[YOUR-PASSWORD]@db.xxx.supabase.co:5432/postgres
+SUPABASE_DB_CONNECTION = st.secrets["SUPABASE_DB_CONNECTION"]
 
-st.title("📰 AI 최신 뉴스 검색 & 자동 저장기입니다")
-st.markdown("키워드를 검색하면 Gemini가 구글 검색을 통해 가장 최신 뉴스 2건을 요약하고 DB에 자동 저장합니다.")
 
-# ----------------------------------------------------
-# 화면 탭 구성 (Tab 3 제외)
-# ----------------------------------------------------
-tab1, tab2 = st.tabs(["🔍 검색하기", "💾 저장된 뉴스 보기"])
+# --------------------------------------------------------------------------
+# 3. Supabase 및 LlamaIndex 초기화
+# --------------------------------------------------------------------------
+@st.cache_resource
+def init_supabase() -> Client:
+    """Supabase 클라이언트 초기화 (캐싱하여 속도 향상)"""
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ==========================================
-# Tab 1: 검색 및 저장 로직
-# ==========================================
+
+@st.cache_resource
+def init_llama_index():
+    """LlamaIndex 전역 설정 — LLM과 임베딩 모델을 Gemini로 지정"""
+    # LLM: 답변 생성용 (gemini-2.5-flash — 무료 티어, 빠름)
+    Settings.llm = GoogleGenAI(
+        model="gemini-2.5-flash",
+        api_key=GEMINI_API_KEY,
+        temperature=0.1,  # 환각 최소화
+    )
+    # 임베딩 모델: 텍스트를 768차원 벡터로 변환
+    Settings.embed_model = GoogleGenAIEmbedding(
+        model_name="text-embedding-004",
+        api_key=GEMINI_API_KEY,
+    )
+    # 청크 크기 (한 조각의 크기)
+    Settings.chunk_size = 500
+    Settings.chunk_overlap = 50
+
+
+@st.cache_resource
+def get_vector_store(company_name: str):
+    """Supabase pgvector에 연결된 LlamaIndex 벡터 스토어 반환"""
+    return SupabaseVectorStore(
+        postgres_connection_string=SUPABASE_DB_CONNECTION,
+        collection_name=company_name.replace(" ", "_").lower(),
+        dimension=768,
+    )
+
+
+supabase = init_supabase()
+init_llama_index()
+
+
+# --------------------------------------------------------------------------
+# 4. 화면 UI 구성 (3개의 탭)
+# --------------------------------------------------------------------------
+st.title("📊 사업보고서 RAG 챗봇")
+st.info(
+    "💡 안내: PDF 사업보고서를 업로드하거나 10-K URL을 입력하면, "
+    "AI가 내용을 학습하고 자연어로 질문에 답해드립니다."
+)
+
+# 세션 상태 초기화
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "current_company" not in st.session_state:
+    st.session_state.current_company = None
+if "index" not in st.session_state:
+    st.session_state.index = None
+
+tab1, tab2, tab3 = st.tabs(["📤 업로드", "💬 챗봇", "📜 채팅 기록"])
+
+# ==========================================================================
+# 탭 1: 사업보고서 업로드 (PDF 또는 HTML URL)
+# ==========================================================================
 with tab1:
-    st.subheader("새로운 뉴스 검색")
-    
-    with st.form("search_form"):
-        keyword = st.text_input("검색할 키워드를 입력하세요 (예: 인공지능, 테슬라, 한국경제 등)")
-        submitted = st.form_submit_button("검색 및 요약하기 🚀")
-        
-    if submitted and keyword:
-        with st.spinner(f"'{keyword}'에 대한 최신 뉴스를 검색하고 분석 중입니다..."):
-            try:
-                # [중요] JSON 강제 모드와 구글 검색 도구는 동시 사용 불가하므로, 프롬프트로 JSON 형태를 강제함
-                prompt = f"""
-                '{keyword}'에 대한 가장 최신 뉴스 딱 2건만 구글에서 검색해 줘.
-                검색된 결과를 바탕으로 반드시 아래 JSON 배열 형식으로만 응답해. 백틱(```)이나 추가 설명 없이 JSON만 출력해.[
-                    {{
-                        "title": "기사 제목",
-                        "source": "언론사 이름",
-                        "news_date": "기사 발행일 (예: 2023-10-25)",
-                        "url": "기사 원본 URL",
-                        "summary": "기사 내용 3줄 요약"
-                    }}
-                ]
-                절대 URL을 지어내지(환각) 마.
-                """
-                
-                # Gemini API 호출 (온도 0.0, 구글 검색 도구 활성화)
-                response = gemini_client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.0,
-                        tools=[{"google_search": {}}]
-                    )
-                )
-                
-                # JSON 텍스트 추출 (마크다운 백틱이 섞여있을 경우 대비)
-                response_text = response.text
-                json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-                
-                if json_match:
-                    news_data = json.loads(json_match.group())
-                    
-                    # ----------------------------------------------------
-                    # [매우 중요] URL 환각 완벽 방지 로직 (Grounding Metadata 활용)
-                    # ----------------------------------------------------
-                    real_links = {}
-                    if hasattr(response, 'candidates') and response.candidates:
-                        grounding_metadata = response.candidates[0].grounding_metadata
-                        if grounding_metadata and grounding_metadata.grounding_chunks:
-                            for chunk in grounding_metadata.grounding_chunks:
-                                if hasattr(chunk, 'web') and chunk.web:
-                                    real_links[chunk.web.title] = chunk.web.uri
-                    
-                    for item in news_data:
-                        for real_title, real_url in real_links.items():
-                            if item['title'].lower() in real_title.lower() or real_title.lower() in item['title'].lower():
-                                if real_url.startswith("http") and "grounding-api-redirect" not in real_url:
-                                    item['url'] = real_url
-                                break
-                    # ----------------------------------------------------
-                    
-                    saved_count = 0
-                    skipped_count = 0
-                    
-                    st.success("✨ 검색이 완료되었습니다!")
-                    
-                    for idx, item in enumerate(news_data):
-                        with st.container():
-                            st.markdown(f"### {idx+1}. [{item['title']}]({item['url']})")
-                            st.caption(f"출처: {item['source']} | 날짜: {item['news_date']}")
-                            st.write(f"**요약:** {item['summary']}")
-                            st.divider()
-                        
-                        try:
-                            db_data = {
-                                "keyword": keyword,
-                                "title": item['title'],
-                                "source": item['source'],
-                                "news_date": item['news_date'],
-                                "url": item['url'],
-                                "summary": item['summary']
-                            }
-                            supabase.table("news_history").insert(db_data).execute()
-                            saved_count += 1
-                        except Exception as e:
-                            if '23505' in str(e) or 'duplicate key' in str(e).lower():
-                                skipped_count += 1
-                            else:
-                                st.error(f"DB 저장 중 오류 발생: {e}")
-                    
-                    st.toast(f"✅ 새 뉴스 {saved_count}건 저장완료! (중복 생략됨: {skipped_count}건)", icon="🎉")
-                else:
-                    st.error("데이터를 파싱하는 데 실패했습니다. 다시 시도해 주세요.")
-                    
-            except Exception as e:
-                st.error(f"오류가 발생했습니다: {str(e)}")
+    st.subheader("사업보고서 인덱싱")
 
-# ==========================================
-# Tab 2: 저장된 뉴스 보기
-# ==========================================
-with tab2:
-    st.subheader("💾 DB에 저장된 뉴스 히스토리")
-    
-    # DB에서 데이터 가져오기 (최신순)
-    response = supabase.table("news_history").select("*").order("created_at", desc=True).execute()
-    data = response.data
-    
-    if data:
-        df = pd.DataFrame(data)
-        
-        # 날짜 포맷 정리
-        df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M:%S')
-        
-        # 필터링 기능
-        filter_text = st.text_input("🔍 제목 또는 키워드로 검색 (결과 내 검색)")
-        if filter_text:
-            df = df[df['title'].str.contains(filter_text, case=False, na=False) | 
-                    df['keyword'].str.contains(filter_text, case=False, na=False)]
-        
-        # 데이터프레임 출력
-        st.dataframe(
-            df[['keyword', 'title', 'source', 'news_date', 'url', 'created_at']],
-            use_container_width=True,
-            hide_index=True
+    company_name = st.text_input(
+        "🏢 회사명 입력",
+        placeholder="예: 삼성전자, Apple, 네이버",
+        help="이 보고서가 어느 회사의 것인지 표시하기 위한 라벨입니다.",
+    )
+
+    # 입력 방식 선택: PDF 파일 또는 HTML URL
+    input_method = st.radio(
+        "📥 데이터 입력 방식",
+        ["📄 PDF 파일 업로드 (DART 사업보고서)", "🌐 HTML URL 입력 (SEC 10-K 등)"],
+        horizontal=True,
+    )
+
+    # ---------- 방식 1: PDF 업로드 ----------
+    if input_method.startswith("📄"):
+        uploaded_file = st.file_uploader(
+            "PDF 파일 선택",
+            type=["pdf"],
+            help="DART(전자공시시스템)에서 다운로드한 사업보고서 PDF를 업로드하세요.",
         )
-        
-        # CSV 다운로드 버튼
-        csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            label="📥 현재 데이터 CSV로 다운로드",
-            data=csv,
-            file_name=f"news_data_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
+
+        if uploaded_file is not None and company_name:
+            if st.button("🚀 PDF 인덱싱 시작", type="primary"):
+                with st.spinner("PDF 읽는 중... (약 1-2분 소요)"):
+                    try:
+                        # PDF를 임시 폴더에 저장 (LlamaIndex가 폴더 단위로 읽기 때문)
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            file_path = os.path.join(temp_dir, uploaded_file.name)
+                            with open(file_path, "wb") as f:
+                                f.write(uploaded_file.getbuffer())
+
+                            # 1. PDF 읽기
+                            documents = SimpleDirectoryReader(
+                                input_dir=temp_dir
+                            ).load_data()
+
+                            # 2. 메타데이터에 회사명 추가 (검색 결과 추적용)
+                            for doc in documents:
+                                doc.metadata["company"] = company_name
+                                doc.metadata["source_type"] = "PDF"
+
+                            # 3. 벡터 스토어 + 인덱스 생성
+                            vector_store = get_vector_store(company_name)
+                            storage_context = StorageContext.from_defaults(
+                                vector_store=vector_store
+                            )
+                            index = VectorStoreIndex.from_documents(
+                                documents,
+                                storage_context=storage_context,
+                                show_progress=True,
+                            )
+
+                            st.session_state.index = index
+                            st.session_state.current_company = company_name
+
+                        st.success(
+                            f"✅ '{company_name}' PDF 인덱싱 완료! "
+                            f"({len(documents)} 페이지 처리)"
+                        )
+                        st.info("💬 챗봇 탭으로 이동해서 질문해보세요.")
+
+                    except Exception as e:
+                        st.error(f"오류 발생: {e}")
+
+    # ---------- 방식 2: HTML URL 입력 ----------
     else:
-        st.info("아직 저장된 뉴스가 없습니다. 탭 1에서 뉴스를 검색해 보세요!")
+        url_input = st.text_input(
+            "🔗 보고서 URL 입력",
+            placeholder="예: https://www.sec.gov/Archives/edgar/data/.../aapl-20240928.htm",
+            help="SEC EDGAR에서 10-K 보고서의 HTML 페이지 URL을 복사해서 붙여넣으세요.",
+        )
+
+        if url_input and company_name:
+            if st.button("🚀 URL 인덱싱 시작", type="primary"):
+                with st.spinner("웹페이지 읽는 중... (약 1-2분 소요)"):
+                    try:
+                        # 1. HTML 웹페이지 읽기
+                        documents = SimpleWebPageReader(html_to_text=True).load_data(
+                            [url_input]
+                        )
+
+                        # 2. 메타데이터 추가
+                        for doc in documents:
+                            doc.metadata["company"] = company_name
+                            doc.metadata["source_type"] = "HTML"
+                            doc.metadata["url"] = url_input
+
+                        # 3. 벡터 스토어 + 인덱스 생성
+                        vector_store = get_vector_store(company_name)
+                        storage_context = StorageContext.from_defaults(
+                            vector_store=vector_store
+                        )
+                        index = VectorStoreIndex.from_documents(
+                            documents,
+                            storage_context=storage_context,
+                            show_progress=True,
+                        )
+
+                        st.session_state.index = index
+                        st.session_state.current_company = company_name
+
+                        st.success(f"✅ '{company_name}' HTML 인덱싱 완료!")
+                        st.info("💬 챗봇 탭으로 이동해서 질문해보세요.")
+
+                    except Exception as e:
+                        st.error(f"오류 발생: {e}")
+
+
+# ==========================================================================
+# 탭 2: 챗봇 (RAG로 질문 답변)
+# ==========================================================================
+with tab2:
+    st.subheader("💬 사업보고서에 질문하기")
+
+    if st.session_state.current_company:
+        st.caption(f"📁 분석 대상: **{st.session_state.current_company}**")
+    else:
+        st.warning("⚠ 먼저 '업로드' 탭에서 사업보고서를 인덱싱해주세요.")
+
+    # 이전 대화 표시
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("sources"):
+                with st.expander("📄 참고 출처"):
+                    for src in msg["sources"]:
+                        st.caption(src)
+
+    # 사용자 입력
+    if prompt := st.chat_input("질문을 입력하세요 (예: 작년 매출은?)"):
+        if not st.session_state.index:
+            st.error("먼저 사업보고서를 업로드해주세요.")
+        else:
+            # 사용자 메시지 표시
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # AI 답변 생성
+            with st.chat_message("assistant"):
+                with st.spinner("답변 생성 중..."):
+                    try:
+                        # RAG 쿼리 실행
+                        query_engine = st.session_state.index.as_query_engine(
+                            similarity_top_k=5,  # 관련 청크 5개 검색
+                        )
+                        response = query_engine.query(prompt)
+
+                        answer = str(response)
+                        st.markdown(answer)
+
+                        # 출처 표시
+                        sources = []
+                        for node in response.source_nodes:
+                            page = node.metadata.get("page_label", "?")
+                            src_type = node.metadata.get("source_type", "")
+                            sources.append(
+                                f"{src_type} 페이지 {page}: {node.text[:100]}..."
+                            )
+
+                        if sources:
+                            with st.expander("📄 참고 출처"):
+                                for src in sources:
+                                    st.caption(src)
+
+                        # 메시지에 저장
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": answer, "sources": sources}
+                        )
+
+                        # Supabase chat_history에 저장
+                        try:
+                            supabase.table("chat_history").insert(
+                                {
+                                    "question": prompt,
+                                    "answer": answer,
+                                    "sources": sources,
+                                    "company_name": st.session_state.current_company,
+                                }
+                            ).execute()
+                        except Exception as db_e:
+                            st.toast(f"DB 저장 실패: {db_e}")
+
+                    except Exception as e:
+                        st.error(f"답변 생성 오류: {e}")
+
+
+# ==========================================================================
+# 탭 3: 채팅 기록 (Supabase에 저장된 과거 대화)
+# ==========================================================================
+with tab3:
+    st.subheader("📜 채팅 기록")
+
+    try:
+        response = (
+            supabase.table("chat_history")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+        )
+
+        if response.data:
+            df = pd.DataFrame(response.data)
+            df = df[["created_at", "company_name", "question", "answer"]]
+            df.columns = ["시간", "회사", "질문", "답변"]
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+            # CSV 다운로드
+            csv = df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "📥 CSV로 다운로드",
+                csv,
+                "chat_history.csv",
+                "text/csv",
+            )
+        else:
+            st.info("아직 저장된 대화가 없습니다. 챗봇 탭에서 질문해보세요!")
+
+    except Exception as e:
+        st.error(f"채팅 기록 불러오기 실패: {e}")
