@@ -219,7 +219,7 @@ def get_vector_store():   #(company_name: str):
         # 회사명을 collection 이름으로 사용 (공백→_, 소문자로 변환)
         # collection_name=company_name.replace(" ", "_").lower(),
         collection_name="business_reports",
-        ddimension=768,  # 임베딩 차원 수 (gemini-embedding-001을 768로 축소해서 사용)
+        dimension=768,  # 임베딩 차원 수 (gemini-embedding-001을 768로 축소해서 사용)
     )
 
 
