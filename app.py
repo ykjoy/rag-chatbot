@@ -52,7 +52,11 @@ from llama_index.core import (
 
 # --- Gemini API와 LlamaIndex를 연결하는 어댑터 ---
 from llama_index.llms.google_genai import GoogleGenAI            # Gemini를 LLM(답변 생성용)으로 쓰기 위한 어댑터
-from llama_index.embeddings.google_genai import GoogleGenAIEmbedding  # Gemini를 임베딩(텍스트→벡터)으로 쓰기 위한 어댑터
+#from llama_index.embeddings.google_genai import GoogleGenAIEmbedding  # Gemini를 임베딩(텍스트→벡터)으로 쓰기 위한 어댑터
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+
+Settings.embed_model = HuggingFaceEmbedding(model_name="jhgan/ko-sroberta-multitask")
 from google.genai.types import EmbedContentConfig                # 임베딩 모델 세부 설정(차원 수 등)
 
 # --- Supabase pgvector와 LlamaIndex를 연결하는 어댑터 ---
@@ -169,13 +173,19 @@ def init_llama_index():
     # ⚠️ 참고: text-embedding-004는 2026년 1월 deprecated되어 더 이상 사용 불가
     # 현재는 gemini-embedding-001을 사용 (기본 3072차원, output_dimensionality로 축소 가능)
     # 우리는 Supabase 테이블이 VECTOR(768)이므로 768차원으로 출력하도록 설정
-    Settings.embed_model = GoogleGenAIEmbedding(
-        model_name="gemini-embedding-001",
-        api_key=GEMINI_API_KEY,
-        embedding_config=EmbedContentConfig(
-            output_dimensionality=768  # 3072 → 768로 축소 (Matryoshka)
-        ),
-    )
+    #Settings.embed_model = GoogleGenAIEmbedding(
+    #    model_name="gemini-embedding-001",
+    #    api_key=GEMINI_API_KEY,
+    #    embedding_config=EmbedContentConfig(
+    #        output_dimensionality=768  # 3072 → 768로 축소 (Matryoshka)
+    #    ),
+    #)
+
+   # [수정된 부분] 
+   # 임베딩(숫자 변환)은 무료 오픈소스 모델을 사용하여 API 한도 초과(429 에러) 완벽 방지!
+   # jhgan/ko-sroberta-multitask 모델은 한국어 처리에 매우 뛰어나며 무료입니다.
+   ettings.embed_model = HuggingFaceEmbedding(model_name="jhgan/ko-sroberta-multitask")
+
     # 청크(chunk) 크기 설정
     # 📝 청크란?
     #    "PDF의 텍스트를 작은 조각으로 자른 것"
