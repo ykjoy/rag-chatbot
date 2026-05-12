@@ -200,7 +200,7 @@ def init_llama_index():
 
 
 @st.cache_resource
-def get_vector_store()   #(company_name: str):
+def get_vector_store():   #(company_name: str):
     """
     Supabase pgvector에 연결된 LlamaIndex 벡터 스토어를 반환합니다.
     
