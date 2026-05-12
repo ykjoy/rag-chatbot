@@ -190,8 +190,8 @@ def init_llama_index():
     #    "PDF의 텍스트를 작은 조각으로 자른 것"
     #    너무 크면 검색 정확도가 떨어지고, 너무 작으면 문맥이 사라집니다.
     #    500자 정도가 한국어/영어 모두에서 적당한 크기입니다.
-    Settings.chunk_size = 500       # 청크당 글자 수
-    Settings.chunk_overlap = 50     # 청크 간 겹치는 글자 수
+    Settings.chunk_size = 2048 #500       # 청크당 글자 수
+    Settings.chunk_overlap = 100 #50     # 청크 간 겹치는 글자 수
                                     # 왜 겹치나? 문장이 청크 경계에서 잘려도
                                     # 옆 청크에 일부 포함되어 의미가 보존되게 하기 위함
 
