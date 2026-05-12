@@ -5,7 +5,6 @@ llama-index-llms-google-genai
 llama-index-embeddings-google-genai
 llama-index-vector-stores-supabase
 llama-index-readers-web
-llama-index-readers-file
 vecs
-pymupdf
+pypdf
 pandas
