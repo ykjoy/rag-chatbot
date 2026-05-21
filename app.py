@@ -160,7 +160,7 @@ def init_llama_index():
     """
     # LLM: 답변을 생성하는 AI (gemini-2.5-flash — 빠르고 무료)
     Settings.llm = GoogleGenAI(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         api_key=GEMINI_API_KEY,
         temperature=0.1,  # 0~1 사이 값. 낮을수록 일관된 답변, 높을수록 창의적 답변
                           # 사업보고서는 정확성이 중요하니 0.1로 낮게 설정
